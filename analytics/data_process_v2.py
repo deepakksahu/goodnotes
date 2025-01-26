@@ -27,9 +27,36 @@ class UserAnalyticsOptimized:
             .csv(metadata_path)
         )
 
+    def validate_data_quality(self, df, schema):
+        """Perform comprehensive data quality checks."""
+        quality_issues = []
+
+        # Schema validation
+        for field in schema.fields:
+            if field.name not in df.columns:
+                quality_issues.append(f"Missing required column: {field.name}")
+
+        # Null checks
+        null_counts = df.select([
+            F.count(F.when(F.col(c).isNull(), c)).alias(c)
+            for c in df.columns
+        ]).collect()[0]
+
+        for column, count in null_counts.asDict().items():
+            if count > 0:
+                quality_issues.append(f"Found {count} null values in column {column}")
+
+        # Business rule validation
+        if "timestamp" in df.columns:
+            future_records = df.filter(F.col("timestamp") > F.current_timestamp()).count()
+            if future_records > 0:
+                quality_issues.append(f"Found {future_records} records with future timestamps")
+
+        return quality_issues
+
     def calculate_active_users(self, start_date: datetime):
         """Calculate Daily and Monthly Active Users."""
-        # Daily Active Users (DAU)
+        # Daily Active Users (DAU): A user who has performed at least one action on a given day.
         daily_active = (
             self.interactions_df
             .withColumn("date", F.to_date("timestamp"))
@@ -38,7 +65,7 @@ class UserAnalyticsOptimized:
             .agg(F.approx_count_distinct("user_id").alias("daily_active_users"))
         )
 
-        # Monthly Active Users (MAU)
+        # Monthly Active Users (MAU): A user who has performed at least one action in a given month.
         monthly_window = Window.orderBy("date").rowsBetween(-30, 0)
         monthly_active = daily_active.withColumn(
             "monthly_active_users",
@@ -117,6 +144,25 @@ def main():
         "dbfs:/test/deepak/user_interactions_sample.csv",
         "dbfs:/test/deepak/user_metadata_sample.csv"
     )
+
+    # Define the expected schema for validation
+    interactions_schema = analytics.interactions_df.schema
+    metadata_schema = analytics.metadata_df.schema
+
+    # Validate data quality
+    interactions_quality_issues = analytics.validate_data_quality(analytics.interactions_df, interactions_schema)
+    metadata_quality_issues = analytics.validate_data_quality(analytics.metadata_df, metadata_schema)
+
+    # Print validation results
+    if interactions_quality_issues:
+        print("Interactions Data Quality Issues:")
+        for issue in interactions_quality_issues:
+            print(f"- {issue}")
+
+    if metadata_quality_issues:
+        print("Metadata Data Quality Issues:")
+        for issue in metadata_quality_issues:
+            print(f"- {issue}")
 
     # Calculate DAU and MAU
     active_users = analytics.calculate_active_users(datetime.now() - timedelta(days=365))
